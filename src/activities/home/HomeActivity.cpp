@@ -602,6 +602,9 @@ int HomeActivity::getMenuItemCount() const {
   if (hasBookmarks || hasClippings) {
     count++;
   }
+  if (app_switcher::otherAppAvailable()) {
+    count++;  // companion-app switch entry (e.g. MicroSlate)
+  }
   return count;
 }
 
