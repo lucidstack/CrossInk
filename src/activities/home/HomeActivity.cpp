@@ -38,6 +38,7 @@
 #include "components/themes/lyra/LyraCarouselTheme.h"
 #include "components/themes/minimal/MinimalTheme.h"
 #include "fontIds.h"
+#include "util/AppSwitcher.h"
 
 namespace {
 constexpr uint32_t CAROUSEL_CACHE_MAGIC = 0x43434152;  // "CCAR"
@@ -58,6 +59,7 @@ enum class HomeMenuAction {
   Bookmarks,
   FileTransfer,
   Settings,
+  SwitchApp,
 };
 
 struct HomeMenuEntry {
@@ -67,7 +69,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 8;
+  static constexpr int kCapacity = 10;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -264,6 +266,9 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
   }
 
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
+  if (app_switcher::otherAppAvailable()) {
+    items.push({app_switcher::otherAppName(), Book, HomeMenuAction::SwitchApp});
+  }
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
 }
 
@@ -288,6 +293,9 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
   }
 
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
+  if (app_switcher::otherAppAvailable()) {
+    items.push({app_switcher::otherAppName(), Book, HomeMenuAction::SwitchApp});
+  }
   return items;
 }
 
@@ -1467,6 +1475,9 @@ void HomeActivity::loop() {
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
+          case HomeMenuAction::SwitchApp:
+            onSwitchApp();
+            break;
           case HomeMenuAction::ContinueReading:
           case HomeMenuAction::Settings:
             break;
@@ -1662,6 +1673,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::FileTransfer:
         onFileTransferOpen();
+        break;
+      case HomeMenuAction::SwitchApp:
+        onSwitchApp();
         break;
       case HomeMenuAction::Settings:
         onSettingsOpen();
@@ -1885,6 +1899,14 @@ void HomeActivity::onContinueReading() {
 void HomeActivity::onRecentsOpen() { activityManager.goToRecentBooks(); }
 
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
+
+void HomeActivity::onSwitchApp() {
+  GUI.drawPopup(renderer, app_switcher::otherAppName());
+  if (!app_switcher::switchToOtherApp()) {
+    // Switch failed (bad otadata / no companion app) — repaint the home screen.
+    requestUpdate();
+  }
+}
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 

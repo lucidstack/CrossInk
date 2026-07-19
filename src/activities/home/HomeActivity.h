@@ -72,6 +72,7 @@ class HomeActivity final : public Activity {
   void onContinueReading();
   void onRecentsOpen();
   void onSettingsOpen();
+  void onSwitchApp();
   void onFileTransferOpen();
   void onOpdsBrowserOpen();
   void onReadingStatsOpen();
