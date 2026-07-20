@@ -81,7 +81,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "activities/settings/KOReaderSettingsActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #ifdef EDITOR_BLE_SPIKE
-#include "activities/util/EditorSpikeActivity.h"
+#include "activities/editor/EditorActivity.h"
 #endif
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -811,11 +811,12 @@ void setup() {
   setupDisplayAndFonts(resume != BootResume::Splash);
 
 #ifdef EDITOR_BLE_SPIKE
-  // Spike: bypass normal boot routing and land straight in the BLE editor
-  // probe. Use replaceActivity (as goHome does) so the spike is the clean base
-  // of the stack — pushActivity would leave an empty/placeholder base that the
-  // sleep teardown (which onExit()s every stack entry) dereferences as null.
-  activityManager.replaceActivity(std::make_unique<EditorSpikeActivity>(renderer, mappedInputManager));
+  // Editor port (step 2): bypass normal boot routing and land straight in the
+  // real editor. Use replaceActivity (as goHome does) so the editor is the
+  // clean base of the stack — pushActivity would leave an empty/placeholder
+  // base that the sleep teardown (which onExit()s every stack entry)
+  // dereferences as null.
+  activityManager.replaceActivity(std::make_unique<EditorActivity>(renderer, mappedInputManager));
   waitForPowerRelease();
   allowSleepAt = millis() + 2000;
   return;
