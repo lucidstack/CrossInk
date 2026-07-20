@@ -811,8 +811,11 @@ void setup() {
   setupDisplayAndFonts(resume != BootResume::Splash);
 
 #ifdef EDITOR_BLE_SPIKE
-  // Spike: bypass normal boot routing and land straight in the BLE editor probe.
-  activityManager.pushActivity(std::make_unique<EditorSpikeActivity>(renderer, mappedInputManager));
+  // Spike: bypass normal boot routing and land straight in the BLE editor
+  // probe. Use replaceActivity (as goHome does) so the spike is the clean base
+  // of the stack — pushActivity would leave an empty/placeholder base that the
+  // sleep teardown (which onExit()s every stack entry) dereferences as null.
+  activityManager.replaceActivity(std::make_unique<EditorSpikeActivity>(renderer, mappedInputManager));
   waitForPowerRelease();
   allowSleepAt = millis() + 2000;
   return;
