@@ -69,6 +69,9 @@ class HomeActivity final : public Activity {
 
   void onSelectBook(const std::string& path);
   void onFileBrowserOpen();
+#ifdef EDITOR_BLE_SPIKE
+  void onNotesOpen();  // browse /notes (PickNote) -> open chosen note (or blank) in the editor
+#endif
   void onContinueReading();
   void onRecentsOpen();
   void onSettingsOpen();

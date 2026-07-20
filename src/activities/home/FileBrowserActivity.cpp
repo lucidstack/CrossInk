@@ -105,6 +105,14 @@ bool acceptFirmware(const char* name, bool isDir) {
   return isDir || FsHelpers::checkFileExtension(std::string_view{name}, ".bin");
 }
 
+bool acceptNote(const char* name, bool isDir) {
+  if (isMacOSMetadataEntry(name) || isWindowsMetadataEntry(name) || (!SETTINGS.showHiddenFiles && name[0] == '.')) {
+    return false;
+  }
+  return isDir || FsHelpers::hasMarkdownExtension(std::string_view{name}) ||
+         FsHelpers::hasTxtExtension(std::string_view{name});
+}
+
 std::string buildFullPath(std::string basepath, const std::string& entry) {
   if (basepath.back() != '/') basepath += "/";
   return basepath + entry;
@@ -179,7 +187,7 @@ bool FileBrowserActivity::loadFilesIntoVector(size_t cap, bool& overflow) {
     return false;
   }
 
-  const auto accept = (mode == Mode::PickFirmware) ? acceptFirmware : acceptCommon;
+  const auto accept = (mode == Mode::PickFirmware) ? acceptFirmware : (mode == Mode::PickNote) ? acceptNote : acceptCommon;
 
   files.reserve(std::min<size_t>(cap, INDEX_THRESHOLD));
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
@@ -235,8 +243,12 @@ void FileBrowserActivity::loadFiles() {
     return;
   }
 
-  if (!overflow || fileListMemoryLimited) {
+  // PickNote always stays in the vector path (notes folders are small) so the
+  // synthetic "New note" row can live at index 0 as an ordinary entry — every
+  // count/index/find path then treats it uniformly, no offset bookkeeping.
+  if (!overflow || fileListMemoryLimited || mode == Mode::PickNote) {
     FsHelpers::sortFileList(files);
+    if (mode == Mode::PickNote) files.insert(files.begin(), tr(STR_NEW_NOTE));
     return;
   }
 
@@ -251,7 +263,7 @@ void FileBrowserActivity::loadFiles() {
       GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
     }
 
-    const auto accept = (mode == Mode::PickFirmware) ? acceptFirmware : acceptCommon;
+    const auto accept = (mode == Mode::PickFirmware) ? acceptFirmware : (mode == Mode::PickNote) ? acceptNote : acceptCommon;
     if (fileIndex->open(basepath.c_str(), accept)) {
       usingIndex = true;
       requestUpdate(true);
@@ -783,6 +795,25 @@ void FileBrowserActivity::loop() {
       return;
     }
 
+    // Note picker: index 0 is the synthetic "New note" row (empty path);
+    // any other file returns its path. Directories fall through to navigation.
+    if (mode == Mode::PickNote) {
+      if (selectorIndex == 0) {
+        ActivityResult res{FilePathResult{std::string()}};
+        res.isCancelled = false;
+        setResult(std::move(res));
+        finish();
+        return;
+      }
+      if (!isDirectory) {
+        ActivityResult res{FilePathResult{buildFullPath(basepath, entry)}};
+        res.isCancelled = false;
+        setResult(std::move(res));
+        finish();
+        return;
+      }
+    }
+
     if (mode == Mode::Books && mappedInput.getHeldTime() >= GO_HOME_MS) {
       if (isDirectory) {
         showDirectoryActionMenu(entry);
@@ -825,8 +856,8 @@ void FileBrowserActivity::loop() {
         selectorIndex = findEntry(dirName);
 
         requestUpdate();
-      } else if (mode == Mode::PickFirmware) {
-        // Firmware picker at root: cancel back to caller instead of going home.
+      } else if (mode == Mode::PickFirmware || mode == Mode::PickNote) {
+        // Picker at root: cancel back to caller instead of going home.
         ActivityResult res;
         res.isCancelled = true;
         setResult(std::move(res));
@@ -894,9 +925,10 @@ void FileBrowserActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
 
   std::string folderName =
-      (mode == Mode::PickFirmware)
-          ? std::string(tr(STR_SELECT_FIRMWARE_FILE))
-          : ((basepath == "/") ? std::string(tr(STR_SD_CARD)) : basepath.substr(basepath.rfind('/') + 1));
+      (mode == Mode::PickFirmware) ? std::string(tr(STR_SELECT_FIRMWARE_FILE))
+      : (mode == Mode::PickNote)   ? std::string(tr(STR_NOTES))
+                                   : ((basepath == "/") ? std::string(tr(STR_SD_CARD))
+                                                        : basepath.substr(basepath.rfind('/') + 1));
   CompactHeader::drawTitle(renderer, folderName.c_str());
 
   const int pathLineHeight = renderer.getLineHeight(SMALL_FONT_ID);

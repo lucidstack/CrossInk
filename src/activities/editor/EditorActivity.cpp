@@ -2,11 +2,13 @@
 
 #include <BleKeyboardHost.h>
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <Logging.h>
 
 #include <cstring>
 
 #include "editor/markdown.h"
+#include "editor/note_names.h"
 #include "editor/text_editor.h"
 #include "fontIds.h"
 
@@ -152,7 +154,77 @@ int drawHeader(GfxRenderer& renderer, int sw) {
   renderer.drawLine(5, 32, sw - 5, 32, true);
   return 38;
 }
+// Strip the directory portion of a path, leaving just the file name.
+const char* baseName(const std::string& path) {
+  const char* slash = strrchr(path.c_str(), '/');
+  return slash ? slash + 1 : path.c_str();
+}
 }  // namespace
+
+void EditorActivity::loadNote() {
+  if (filePath_.empty() || !Storage.exists(filePath_.c_str())) return;
+
+  // Read straight into the editor's own buffer — no intermediate copy, which
+  // matters on this tight heap.
+  char* buf = editorGetBuffer();
+  size_t n = Storage.readFileToBuffer(filePath_.c_str(), buf, TEXT_BUFFER_SIZE);
+  editorLoadBuffer(n);
+
+  const char* base = baseName(filePath_);
+  char title[MAX_TITLE_LEN];
+  filenameToTitle(base, title, MAX_TITLE_LEN);
+  editorSetCurrentTitle(title);
+  editorSetCurrentFile(base);
+  editorSetUnsavedChanges(false);
+  LOG_INF("EDITOR", "Loaded %s (%u bytes)", filePath_.c_str(), (unsigned)n);
+}
+
+bool EditorActivity::saveNote() {
+  Storage.ensureDirectoryExists(kNotesDir);
+
+  // New note: derive a filename from the title, uniquified against /notes.
+  if (filePath_.empty()) {
+    char fn[MAX_FILENAME_LEN];
+    titleToFilename(editorGetCurrentTitle(), fn, MAX_FILENAME_LEN);
+
+    std::string candidate = std::string(kNotesDir) + "/" + fn;
+    if (Storage.exists(candidate.c_str())) {
+      // Insert " N" before the ".md" until a free name is found.
+      std::string stem(fn);
+      std::string ext;
+      size_t dot = stem.rfind('.');
+      if (dot != std::string::npos) {
+        ext = stem.substr(dot);
+        stem = stem.substr(0, dot);
+      }
+      for (int i = 2; i < 1000; i++) {
+        candidate = std::string(kNotesDir) + "/" + stem + "_" + std::to_string(i) + ext;
+        if (!Storage.exists(candidate.c_str())) break;
+      }
+    }
+    filePath_ = candidate;
+    editorSetCurrentFile(baseName(filePath_));
+  }
+
+  // Write via an FsFile so the 16KB buffer is streamed out, not copied into an
+  // Arduino String (which would transiently double heap use).
+  FsFile f;
+  if (!Storage.openFileForWrite("EDITOR", filePath_.c_str(), f)) {
+    LOG_ERR("EDITOR", "Save failed to open %s", filePath_.c_str());
+    return false;
+  }
+  f.write(reinterpret_cast<const uint8_t*>(editorGetBuffer()), editorGetLength());
+  f.close();
+  editorSetUnsavedChanges(false);
+  justSaved_ = true;
+  LOG_INF("EDITOR", "Saved %s (%u bytes)", filePath_.c_str(), (unsigned)editorGetLength());
+  return true;
+}
+
+void EditorActivity::onExit() {
+  if (editorHasUnsavedChanges() && editorGetLength() > 0) saveNote();
+  Activity::onExit();
+}
 
 void EditorActivity::onEnter() {
   Activity::onEnter();
@@ -167,6 +239,8 @@ void EditorActivity::onEnter() {
   int cpl = (sw - 2 * kMargin) / glyphW;
   if (cpl < 8) cpl = 8;
   editorSetCharsPerLine(cpl);
+
+  loadNote();  // no-op for a new (empty path) note
 
   if (!BleHid.begin("CrossInk")) {
     LOG_ERR("EDITOR", "BleHid.begin() failed — capability compiled out or BLE init error");
@@ -184,6 +258,12 @@ void EditorActivity::drainKeyboard() {
   bool dirty = false;
   KeyEvent ev;
   while (BleHid.popKey(ev)) {
+    // Ctrl+S saves (HID: left ctrl 0x01 / right ctrl 0x10, 's' keycode 0x16).
+    if ((ev.mods & 0x11) && ev.keycode == 0x16) {
+      saveNote();
+      dirty = true;
+      continue;
+    }
     switch (ev.special) {
       case SpecialKey::Enter:     editorInsertChar('\n');   dirty = true; continue;
       case SpecialKey::Backspace: editorDeleteChar();       dirty = true; continue;
@@ -197,6 +277,7 @@ void EditorActivity::drainKeyboard() {
       case SpecialKey::End:       editorMoveCursorEnd();    dirty = true; continue;
       default: break;  // None / Escape / PageUp / PageDown — not handled yet
     }
+    if (ev.mods & 0x11) continue;  // swallow other Ctrl+key combos (not typed text)
     if (ev.ch >= 32 && ev.ch < 127) {
       editorInsertChar(ev.ch);
       dirty = true;

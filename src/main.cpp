@@ -80,9 +80,6 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "activities/reader/StatsBackup.h"
 #include "activities/settings/KOReaderSettingsActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
-#ifdef EDITOR_BLE_SPIKE
-#include "activities/editor/EditorActivity.h"
-#endif
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/UsbSerialFileTransfer.h"
@@ -810,17 +807,9 @@ void setup() {
 
   setupDisplayAndFonts(resume != BootResume::Splash);
 
-#ifdef EDITOR_BLE_SPIKE
-  // Editor port (step 2): bypass normal boot routing and land straight in the
-  // real editor. Use replaceActivity (as goHome does) so the editor is the
-  // clean base of the stack — pushActivity would leave an empty/placeholder
-  // base that the sleep teardown (which onExit()s every stack entry)
-  // dereferences as null.
-  activityManager.replaceActivity(std::make_unique<EditorActivity>(renderer, mappedInputManager));
-  waitForPowerRelease();
-  allowSleepAt = millis() + 2000;
-  return;
-#endif
+  // Editor port (step 3): boot normally to Home; the editor is reached via the
+  // Home "Notes" item (guarded by EDITOR_BLE_SPIKE), which browses /notes and
+  // opens the chosen note — or a new blank one — in EditorActivity.
 
   switch (resume) {
     case BootResume::Silent:

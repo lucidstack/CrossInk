@@ -14,8 +14,10 @@
 
 class FileBrowserActivity final : public Activity {
  public:
-  // Books = standard reader browser; PickFirmware = filter to .bin only and return path via ActivityResult.
-  enum class Mode { Books, PickFirmware };
+  // Books = standard reader browser; PickFirmware = filter to .bin only and return path via ActivityResult;
+  // PickNote = filter to .md/.txt, show a synthetic "New note" row, return the chosen path (empty = new)
+  // via ActivityResult (used by the Notes/editor flow).
+  enum class Mode { Books, PickFirmware, PickNote };
 
  private:
   // Deletion

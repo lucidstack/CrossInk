@@ -38,6 +38,9 @@
 #include "components/themes/lyra/LyraCarouselTheme.h"
 #include "components/themes/minimal/MinimalTheme.h"
 #include "fontIds.h"
+#ifdef EDITOR_BLE_SPIKE
+#include "activities/editor/EditorActivity.h"
+#endif
 
 namespace {
 constexpr uint32_t CAROUSEL_CACHE_MAGIC = 0x43434152;  // "CCAR"
@@ -58,6 +61,9 @@ enum class HomeMenuAction {
   Bookmarks,
   FileTransfer,
   Settings,
+#ifdef EDITOR_BLE_SPIKE
+  OpenNotes,
+#endif
 };
 
 struct HomeMenuEntry {
@@ -251,6 +257,9 @@ const char* savedItemsLabel(bool hasBookmarks, bool hasClippings) {
 void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasReadingStats, bool hasBookmarks,
                          bool hasClippings) {
   items.push({tr(STR_BROWSE_FILES), Folder, HomeMenuAction::BrowseFiles});
+#ifdef EDITOR_BLE_SPIKE
+  items.push({tr(STR_NOTES), Text, HomeMenuAction::OpenNotes});
+#endif
   items.push({tr(STR_MENU_RECENT_BOOKS), Recent, HomeMenuAction::RecentBooks});
 
   if (hasOpdsServers) {
@@ -1452,6 +1461,11 @@ void HomeActivity::loop() {
           case HomeMenuAction::BrowseFiles:
             onFileBrowserOpen();
             break;
+#ifdef EDITOR_BLE_SPIKE
+          case HomeMenuAction::OpenNotes:
+            onNotesOpen();
+            break;
+#endif
           case HomeMenuAction::RecentBooks:
             onRecentsOpen();
             break;
@@ -1645,6 +1659,11 @@ void HomeActivity::loop() {
       case HomeMenuAction::BrowseFiles:
         onFileBrowserOpen();
         break;
+#ifdef EDITOR_BLE_SPIKE
+      case HomeMenuAction::OpenNotes:
+        onNotesOpen();
+        break;
+#endif
       case HomeMenuAction::ContinueReading:
         onContinueReading();
         break;
@@ -1875,6 +1894,24 @@ void HomeActivity::onSelectBook(const std::string& path) {
 }
 
 void HomeActivity::onFileBrowserOpen() { activityManager.goToFileBrowser(); }
+
+#ifdef EDITOR_BLE_SPIKE
+void HomeActivity::onNotesOpen() {
+  // Reuse the standard file browser filtered to notes (.md/.txt), with a
+  // synthetic "New note" row. It returns the chosen path (empty = new note).
+  startActivityForResult(
+      std::make_unique<FileBrowserActivity>(renderer, mappedInput, "/notes", FileBrowserActivity::Mode::PickNote),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) return;  // back out to Home
+        const auto* path = std::get_if<FilePathResult>(&result.data);
+        if (!path) return;
+        // Launch the editor as a clean stack base (replaceActivity, like goHome)
+        // so the browser is torn down first and the null-base sleep crash is
+        // avoided. Empty path => start a new blank note.
+        activityManager.replaceActivity(std::make_unique<EditorActivity>(renderer, mappedInput, path->path));
+      });
+}
+#endif
 
 void HomeActivity::onContinueReading() {
   if (!recentBooks.empty()) {
