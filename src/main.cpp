@@ -80,6 +80,9 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "activities/reader/StatsBackup.h"
 #include "activities/settings/KOReaderSettingsActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
+#ifdef EDITOR_BLE_SPIKE
+#include "activities/util/EditorSpikeActivity.h"
+#endif
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/UsbSerialFileTransfer.h"
@@ -806,6 +809,14 @@ void setup() {
                                                         : BootResume::Splash;
 
   setupDisplayAndFonts(resume != BootResume::Splash);
+
+#ifdef EDITOR_BLE_SPIKE
+  // Spike: bypass normal boot routing and land straight in the BLE editor probe.
+  activityManager.pushActivity(std::make_unique<EditorSpikeActivity>(renderer, mappedInputManager));
+  waitForPowerRelease();
+  allowSleepAt = millis() + 2000;
+  return;
+#endif
 
   switch (resume) {
     case BootResume::Silent:
