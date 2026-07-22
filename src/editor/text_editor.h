@@ -2,7 +2,8 @@
 
 #include "editor_config.h"
 
-void editorInit();
+bool editorInit();  // Allocates the text/line buffers; false = out of memory
+void editorFree();  // Returns the buffers to the heap (safe to call when unallocated)
 void editorClear();
 void editorLoadBuffer(size_t length);  // After filling buffer externally, set length + reset cursor
 
@@ -26,8 +27,8 @@ void editorMoveCursorEnd();
 
 // Line/viewport management
 void editorSetCharsPerLine(int cpl);
-void editorSetVisibleLines(int n);   // Tell editor how many lines are visible on screen
-int editorGetStoredVisibleLines();   // Get the last set visible lines count
+void editorSetVisibleLines(int n);  // Tell editor how many lines are visible on screen
+int editorGetStoredVisibleLines();  // Get the last set visible lines count
 void editorRecalculateLines();
 int editorGetVisibleLines(int lineHeight, int textAreaHeight);
 int editorGetViewportStart();

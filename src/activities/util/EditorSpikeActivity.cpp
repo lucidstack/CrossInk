@@ -1,3 +1,7 @@
+// Spike-only translation unit: BleKeyboardHost (and NimBLE) exist only in the
+// spike env, and PlatformIO compiles every src/**.cpp in every env.
+#ifdef EDITOR_BLE_SPIKE
+
 #include "EditorSpikeActivity.h"
 
 #include <BleKeyboardHost.h>
@@ -135,3 +139,5 @@ void EditorSpikeActivity::render(RenderLock&&) {
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 }
+
+#endif  // EDITOR_BLE_SPIKE

@@ -1,9 +1,16 @@
 #include "text_editor.h"
-#include <cstring>
+
 #include <algorithm>
+#include <cstring>
+#include <new>
 
 // --- Text buffer ---
-static char textBuffer[TEXT_BUFFER_SIZE];
+// Heap-allocated in editorInit() and returned in editorFree(): 16KB + 4KB as
+// statics would stay resident in DRAM for the whole firmware, starving the
+// reader's chapter-layout heap even when the editor is closed. Raw
+// new(nothrow) (not makeUniqueNoThrow) keeps this module host-compilable for
+// the native unit tests without pulling in lib/Memory.
+static char* textBuffer = nullptr;
 static size_t textLength = 0;
 static int cursorPosition = 0;
 
@@ -13,7 +20,7 @@ static char currentTitle[MAX_TITLE_LEN] = "Untitled";
 static bool unsavedChanges = false;
 
 // --- Line management ---
-static int linePositions[MAX_LINES];  // Index into textBuffer for start of each line
+static int* linePositions = nullptr;  // Index into textBuffer for start of each line
 static int lineCount = 0;
 static int cursorLine = 0;
 static int cursorCol = 0;
@@ -58,7 +65,7 @@ void editorRecalculateLines() {
         // Word wrap
         int breakPos;
         if (lastSpace > linePositions[lineCount - 1]) {
-          breakPos = lastSpace + 1; // Break after space
+          breakPos = lastSpace + 1;  // Break after space
         } else {
           breakPos = i + 1;  // Hard break mid-word
         }
@@ -88,7 +95,7 @@ void editorRecalculateLines() {
 
 // Ensure cursor is visible by adjusting viewport
 static void ensureCursorVisible(int visibleLines) {
-  if (visibleLines <= 0) visibleLines = 20; // fallback
+  if (visibleLines <= 0) visibleLines = 20;  // fallback
 
   if (cursorLine < viewportStartLine) {
     viewportStartLine = cursorLine;
@@ -100,7 +107,13 @@ static void ensureCursorVisible(int visibleLines) {
   if (viewportStartLine >= lineCount) viewportStartLine = std::max(0, lineCount - 1);
 }
 
-void editorInit() {
+bool editorInit() {
+  if (!textBuffer) textBuffer = new (std::nothrow) char[TEXT_BUFFER_SIZE];
+  if (!linePositions) linePositions = new (std::nothrow) int[MAX_LINES];
+  if (!textBuffer || !linePositions) {
+    editorFree();
+    return false;
+  }
   memset(textBuffer, 0, TEXT_BUFFER_SIZE);
   textLength = 0;
   cursorPosition = 0;
@@ -110,6 +123,17 @@ void editorInit() {
   viewportStartLine = 0;
   lineBreaksDirty = true;
   editorRecalculateLines();
+  return true;
+}
+
+void editorFree() {
+  delete[] textBuffer;
+  textBuffer = nullptr;
+  delete[] linePositions;
+  linePositions = nullptr;
+  textLength = 0;
+  cursorPosition = 0;
+  lineCount = 0;
 }
 
 void editorClear() {
@@ -145,7 +169,10 @@ int editorGetWordCount() {
     if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
       inWord = false;
     } else {
-      if (!inWord) { count++; inWord = true; }
+      if (!inWord) {
+        count++;
+        inWord = true;
+      }
     }
   }
   return count;
@@ -278,9 +305,7 @@ void editorSetVisibleLines(int n) {
   if (n > 0) storedVisibleLines = n;
 }
 
-int editorGetStoredVisibleLines() {
-  return storedVisibleLines;
-}
+int editorGetStoredVisibleLines() { return storedVisibleLines; }
 
 int editorGetVisibleLines(int lineHeight, int textAreaHeight) {
   if (lineHeight <= 0) return 20;

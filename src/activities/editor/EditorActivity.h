@@ -32,12 +32,19 @@ class EditorActivity final : public Activity {
 
   std::string filePath_;  // "" until a new note is first saved
   bool justSaved_ = false;
+  bool initFailed_ = false;  // editor buffers could not be allocated; bounce home
 
   bool connectAttempted_ = false;
   bool lastConnected_ = false;
   unsigned long scanStartedAt_ = 0;
 
-  void loadNote();       // read filePath_ into the editor buffer (if it exists)
-  bool saveNote();       // write the buffer back to SD; assigns filePath_ for new notes
-  void drainKeyboard();  // pump BLE key events into the editor core
+  int fontIdx_ = 1;  // index into the body-font size table (default ~14px)
+  GfxRenderer::Orientation savedOrientation_ = GfxRenderer::Portrait;  // restored on exit
+
+  void loadNote();               // read filePath_ into the editor buffer (if it exists)
+  bool saveNote();               // write the buffer back to SD; assigns filePath_ for new notes
+  void drainKeyboard();          // pump BLE key events into the editor core
+  void applyFontIndex();         // set the body font from fontIdx_ and reflow
+  void recomputeCharsPerLine();  // re-derive the wrap width from font + screen size
+  void cycleOrientation();       // step the display orientation (Enter key)
 };
