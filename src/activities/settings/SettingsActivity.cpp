@@ -26,6 +26,9 @@
 #include "SdFirmwareUpdateActivity.h"
 #include "SettingsList.h"
 #include "StatusBarSettingsActivity.h"
+#ifdef EDITOR_BLE_SPIKE
+#include "BluetoothSettingsActivity.h"
+#endif
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/GlobalReadingStats.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -727,6 +730,15 @@ void SettingsActivity::toggleCurrentSetting() {
       case SettingAction::Network:
         startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false), resultHandler);
         break;
+#ifdef EDITOR_BLE_SPIKE
+      case SettingAction::Bluetooth:
+        // Launch as a clean stack base (like the editor), NOT stacked on Settings:
+        // NimBLE + fresh pairing needs the heap headroom, and stacked on
+        // Settings/Home it OOMs on connect (free heap collapses to ~5KB). The BT
+        // tab returns to Settings on exit via goToSettings().
+        activityManager.replaceActivity(std::make_unique<BluetoothSettingsActivity>(renderer, mappedInput));
+        return;
+#endif
       case SettingAction::BackupStats:
         startActivityForResult(std::make_unique<BackupStatsActivity>(renderer, mappedInput), resultHandler);
         break;

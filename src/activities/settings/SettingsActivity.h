@@ -32,6 +32,9 @@ enum class SettingAction {
   SystemReadingStats,
   SystemGlobalStats,
   Network,
+#ifdef EDITOR_BLE_SPIKE
+  Bluetooth,
+#endif
   BackupStats,
   ResetGlobalStats,
   ClearCache,
