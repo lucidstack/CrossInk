@@ -1,6 +1,7 @@
 #include "Section.h"
 
 #include <Arduino.h>
+#include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <InflateReader.h>
@@ -10,6 +11,7 @@
 #include <ScratchWorkspace.h>
 #include <Serialization.h>
 
+#include "Epub/converters/ImageDecoderFactory.h"
 #include "Epub/css/CssParser.h"
 #include "Page.h"
 #include "hyphenation/Hyphenator.h"
@@ -82,6 +84,177 @@ size_t sectionHtmlStreamChunkSize(const bool preview) {
     return LOW_MEMORY_SECTION_HTML_STREAM_CHUNK_SIZE;
   }
   return SECTION_HTML_STREAM_CHUNK_SIZE;
+}
+
+bool asciiEqualsIgnoreCase(const char a, const char b) {
+  const char la = (a >= 'A' && a <= 'Z') ? static_cast<char>(a - 'A' + 'a') : a;
+  const char lb = (b >= 'A' && b <= 'Z') ? static_cast<char>(b - 'A' + 'a') : b;
+  return la == lb;
+}
+
+size_t findImgTagStart(const std::string& window, const size_t from) {
+  static const char kNeedle[] = "<img";
+  if (window.size() < 4) return std::string::npos;
+  for (size_t i = from; i + 4 <= window.size(); i++) {
+    bool match = true;
+    for (size_t j = 0; j < 4; j++) {
+      if (!asciiEqualsIgnoreCase(window[i + j], kNeedle[j])) {
+        match = false;
+        break;
+      }
+    }
+    // Require a tag-name boundary so <image> (SVG) is not treated as <img>.
+    if (match) {
+      const char next = (i + 4 < window.size()) ? window[i + 4] : ' ';
+      if (next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '/' || next == '>') {
+        return i;
+      }
+    }
+  }
+  return std::string::npos;
+}
+
+// Pull the value of the src attribute out of a raw <img ...> tag. The scan
+// sees raw markup (no expat entity decoding), so decode &amp; — the only
+// entity that legitimately shows up inside intra-zip image URLs.
+std::string imgTagSrcValue(const std::string& tag) {
+  for (size_t i = 1; i + 4 < tag.size(); i++) {
+    if (!asciiEqualsIgnoreCase(tag[i], 's') || !asciiEqualsIgnoreCase(tag[i + 1], 'r') ||
+        !asciiEqualsIgnoreCase(tag[i + 2], 'c')) {
+      continue;
+    }
+    // Attribute-name boundary: previous char must be whitespace (rejects data-src).
+    const char prev = tag[i - 1];
+    if (prev != ' ' && prev != '\t' && prev != '\n' && prev != '\r') continue;
+
+    size_t p = i + 3;
+    while (p < tag.size() && (tag[p] == ' ' || tag[p] == '\t' || tag[p] == '\n' || tag[p] == '\r')) p++;
+    if (p >= tag.size() || tag[p] != '=') continue;
+    p++;
+    while (p < tag.size() && (tag[p] == ' ' || tag[p] == '\t' || tag[p] == '\n' || tag[p] == '\r')) p++;
+    if (p >= tag.size() || (tag[p] != '"' && tag[p] != '\'')) continue;
+    const char quote = tag[p];
+    const size_t valueStart = p + 1;
+    const size_t valueEnd = tag.find(quote, valueStart);
+    if (valueEnd == std::string::npos) return "";
+
+    std::string value = tag.substr(valueStart, valueEnd - valueStart);
+    size_t amp;
+    while ((amp = value.find("&amp;")) != std::string::npos) {
+      value.replace(amp, 5, "&");
+    }
+    return value;
+  }
+  return "";
+}
+
+// Extract every <img src> in the chapter HTML into the section image cache
+// before layout begins, while the heap still has room for the 32KB zip
+// inflate dictionary. The parser then finds each image already cached and
+// performs no zip inflation mid-parse, so its low-memory floors can drop the
+// dictionary reserve and spend that heap on layout instead. Individual image
+// failures are non-fatal (the parser retries on cache miss and falls back to
+// alt text); returns false only when the HTML itself could not be scanned.
+bool preExtractSectionImages(const std::shared_ptr<Epub>& epub, GfxRenderer& renderer, const int fontId,
+                             const std::string& parsePath, const std::string& contentBase,
+                             const std::string& imageBasePath) {
+  HalFile html;
+  if (!Storage.openFileForRead("SCT", parsePath, html)) {
+    LOG_ERR("SCT", "Image pre-pass failed to open %s", parsePath.c_str());
+    return false;
+  }
+
+  // One inflate scratch lease shared by every extraction in this pass.
+  auto inflateScratch = acquireSectionZipInflateScratch(renderer, fontId, "section image pre-pass");
+
+  constexpr size_t kReadChunk = 1024;
+  constexpr size_t kMaxTagBytes = 3072;  // pathological tags longer than this are skipped
+  std::string window;
+  window.reserve(kReadChunk + kMaxTagBytes);
+  auto chunk = makeUniqueNoThrow<char[]>(kReadChunk);
+  if (!chunk) {
+    html.close();
+    return false;
+  }
+  int extracted = 0;
+  bool moreData = true;
+
+  while (moreData) {
+    const int len = html.read(chunk.get(), kReadChunk);
+    if (len <= 0) {
+      moreData = false;
+    } else {
+      window.append(chunk.get(), static_cast<size_t>(len));
+    }
+
+    size_t scanned = 0;
+    while (true) {
+      const size_t tagStart = findImgTagStart(window, scanned);
+      if (tagStart == std::string::npos) {
+        // Keep a small tail in case "<img" straddles the chunk boundary.
+        const size_t keep = window.size() < 4 ? window.size() : 3;
+        window.erase(0, window.size() - keep);
+        break;
+      }
+      const size_t tagEnd = window.find('>', tagStart);
+      if (tagEnd == std::string::npos) {
+        if (moreData && window.size() - tagStart < kMaxTagBytes) {
+          window.erase(0, tagStart);  // carry the partial tag, read more
+        } else {
+          window.erase(0, tagStart + 4);  // oversized/unterminated tag: skip it
+        }
+        break;
+      }
+
+      const std::string tag = window.substr(tagStart, tagEnd - tagStart + 1);
+      scanned = 0;
+      window.erase(0, tagEnd + 1);
+
+      const std::string src = imgTagSrcValue(tag);
+      if (src.empty()) continue;
+      const std::string resolvedPath = FsHelpers::normalisePath(FsHelpers::decodeUriEscapes(contentBase + src));
+      const size_t dot = resolvedPath.rfind('.');
+      if (dot != std::string::npos) {
+        std::string ext = resolvedPath.substr(dot);
+        for (char& c : ext) {
+          if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (ext == ".svg" || ext == ".svgz") continue;
+      }
+      if (!ImageDecoderFactory::isFormatSupported(resolvedPath)) continue;
+
+      const std::string cachedImagePath = ChapterHtmlSlimParser::cachedImagePathForSource(imageBasePath, resolvedPath);
+      if (Storage.exists(cachedImagePath.c_str())) {
+        // Treat a zero-byte leftover from an interrupted extraction as a miss.
+        HalFile existing;
+        bool hasContent = false;
+        if (Storage.openFileForRead("SCT", cachedImagePath, existing)) {
+          hasContent = existing.size() > 0;
+          existing.close();
+        }
+        if (hasContent) continue;
+      }
+
+      HalFile out;
+      if (!Storage.openFileForWrite("SCT", cachedImagePath, out)) continue;
+      const bool ok = epub->readItemContentsToStream(resolvedPath, out, 1024);
+      out.flush();
+      out.close();
+      if (!ok) {
+        Storage.remove(cachedImagePath.c_str());
+        LOG_ERR("SCT", "Image pre-pass failed to extract %s", resolvedPath.c_str());
+        continue;
+      }
+      extracted++;
+    }
+  }
+
+  html.close();
+  if (extracted > 0) {
+    LOG_DBG("SCT", "Image pre-pass extracted %d image(s) (free=%u, maxAlloc=%u)", extracted, ESP.getFreeHeap(),
+            ESP.getMaxAllocHeap());
+  }
+  return true;
 }
 }  // namespace
 
@@ -464,7 +637,26 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
       embeddedStyle, contentBase, imageBasePath, imageRendering, std::move(tocAnchors), popupFn, cssParser, renderMode,
       buildOptions.isPreview() ? std::string(buildOptions.previewAnchor) : std::string{}, buildOptions.previewMaxPages);
   Hyphenator::setPreferredLanguage(epub->getLanguage());
-  LOG_DBG("SCT", "Parser start: spine=%d free=%u maxAlloc=%u", spineIndex, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+
+  // Extract the chapter's images up front, while the heap still has room for
+  // the 32KB zip inflate dictionary. The parser then finds every image
+  // already cached and performs no zip inflation mid-parse, letting its
+  // low-memory floors drop the dictionary reserve and spend that heap on
+  // layout (see preExtractSectionImages). When images are disabled the parse
+  // does no zip work either, so the relaxed floors apply trivially. Previews
+  // cap at a few pages and keep the conservative floors instead.
+  bool imagesPreExtracted = false;
+  if (!buildOptions.isPreview()) {
+    if (imageRendering == 1) {
+      imagesPreExtracted = true;
+    } else {
+      imagesPreExtracted = preExtractSectionImages(epub, renderer, fontId, parsePath, contentBase, imageBasePath);
+    }
+    visitor.setImagesPreExtracted(imagesPreExtracted);
+  }
+
+  LOG_DBG("SCT", "Parser start: spine=%d free=%u maxAlloc=%u preExtracted=%u", spineIndex, ESP.getFreeHeap(),
+          ESP.getMaxAllocHeap(), imagesPreExtracted ? 1U : 0U);
   const bool success = visitor.parseAndBuildPages();
   LOG_DBG("SCT", "Parser done: spine=%d success=%u pages=%u free=%u maxAlloc=%u", spineIndex, success, pageCount,
           ESP.getFreeHeap(), ESP.getMaxAllocHeap());

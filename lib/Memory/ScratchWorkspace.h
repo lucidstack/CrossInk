@@ -47,6 +47,12 @@ class Borrow final {
 
 Lease acquire(size_t bytes, const char* owner);
 Borrow borrow(size_t minBytes, const char* owner);
+// Capacity of the currently held lease (0 when none). Lets low-memory floor
+// checks count a pre-reserved workspace as available: consumers that need a
+// large contiguous block (e.g. the zip inflate dictionary) borrow the lease
+// instead of malloc'ing, so a live lease satisfies that requirement even when
+// the general heap is too fragmented to provide the block fresh.
+size_t leasedCapacity();
 bool initialize();
 void releaseLease(Lease& lease);
 void releaseBorrow(Borrow& borrow);

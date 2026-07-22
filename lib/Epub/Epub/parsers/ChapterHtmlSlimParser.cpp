@@ -5,9 +5,11 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <InflateReader.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <MemoryBudget.h>
+#include <ScratchWorkspace.h>
 #include <Utf8.h>
 #include <XmlParserUtils.h>
 #include <expat.h>
@@ -34,6 +36,23 @@ constexpr size_t PARSE_ARENA_SLAB_SIZE = 4 * 1024;
 constexpr size_t IMAGE_EXTRACT_CHUNK_SIZE = 1024;
 constexpr uint32_t MIN_FREE_HEAP_FOR_TEXT_LAYOUT = 44 * 1024;
 constexpr uint32_t MIN_MAX_ALLOC_FOR_TEXT_LAYOUT = 32 * 1024;
+// Genuine working room the layout loop needs even when the 32KB inflate
+// dictionary is covered by a ScratchWorkspace lease: page/arena/string churn
+// allocates from the ordinary heap, and running it dry ends in a bare
+// allocation abort() instead of a graceful build abort (observed on hardware
+// at ~7KB free / ~4KB max alloc).
+constexpr uint32_t MIN_WORKING_FREE_HEAP_FOR_TEXT_LAYOUT = 10 * 1024;
+constexpr uint32_t MIN_WORKING_MAX_ALLOC_FOR_TEXT_LAYOUT = 6 * 1024;
+// Floors when the chapter's images are already extracted (no mid-parse zip
+// inflation possible): layout working room with a safety margin over the
+// hardware-observed crash point (~7KB free / ~4KB max alloc).
+constexpr uint32_t MIN_PREEXTRACTED_FREE_HEAP_FOR_TEXT_LAYOUT = 16 * 1024;
+constexpr uint32_t MIN_PREEXTRACTED_MAX_ALLOC_FOR_TEXT_LAYOUT = 8 * 1024;
+// Skip the all-styles advance prewarm when free heap is below this: it front-
+// loads ~20-30KB of glyph cache purely as a speed optimization, which starves
+// the layout loop when the section build holds the inflate reserve. Advance
+// data still loads lazily for the styles actually used.
+constexpr uint32_t MIN_FREE_HEAP_FOR_SECTION_ADVANCE_PREWARM = 48 * 1024;
 constexpr uint32_t MIN_FREE_HEAP_FOR_TABLE_BUFFERING = 64 * 1024;
 constexpr uint32_t MIN_MAX_ALLOC_FOR_TABLE_BUFFERING = 40 * 1024;
 constexpr size_t DEFAULT_BUFFERED_WORDS_BEFORE_LAYOUT = 350;
@@ -66,6 +85,17 @@ static constexpr const char* const SKIP_TAGS[] = {"head"};
 bool isWhitespace(const char c) { return c == ' ' || c == '\r' || c == '\n' || c == '\t'; }
 
 static char asciiLower(const char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
+
+// True when a previously extracted image cache file is present and non-empty
+// (a zero-byte file is a leftover from an interrupted extraction).
+bool cachedFileHasContent(const char* path) {
+  if (!Storage.exists(path)) return false;
+  FsFile f;
+  if (!Storage.openFileForRead("EHP", path, f)) return false;
+  const bool hasContent = f.size() > 0;
+  f.close();
+  return hasContent;
+}
 
 bool isSvgImagePath(const std::string_view path) {
   const size_t end = path.find_first_of("?#");
@@ -294,13 +324,41 @@ void ChapterHtmlSlimParser::updateEffectiveInlineStyle() {
   }
 }
 
+// The text-layout floors. With the chapter's images pre-extracted to the SD
+// cache (Section's pre-pass), the parse needs no mid-parse zip inflation, so
+// the historical 44KB/32KB floors — sized to keep a 32KB inflate dictionary
+// obtainable at any moment — drop to genuine layout working room. Should an
+// image still need extraction (pre-pass scan missed it), extraction failure
+// degrades to the alt-text fallback instead of aborting the build.
+// Without pre-extraction the raw floors apply, counting a held
+// ScratchWorkspace lease as available: the dictionary borrows the lease
+// instead of malloc'ing, and the free floor's dictionary headroom is already
+// set aside in it. With no lease either, this reduces to the original floors.
+bool ChapterHtmlSlimParser::textLayoutFloorsMet(const MemoryBudget::HeapSnapshot heap) const {
+  if (imagesPreExtracted_) {
+    return heap.freeHeap >= MIN_PREEXTRACTED_FREE_HEAP_FOR_TEXT_LAYOUT &&
+           heap.maxAllocHeap >= MIN_PREEXTRACTED_MAX_ALLOC_FOR_TEXT_LAYOUT;
+  }
+
+  const uint32_t reserved = ScratchWorkspace::leasedCapacity();
+  const bool dictCovered =
+      heap.maxAllocHeap >= MIN_MAX_ALLOC_FOR_TEXT_LAYOUT || reserved >= InflateReader::STREAMING_DICT_SIZE;
+  if (!dictCovered) return false;
+  if (heap.freeHeap + reserved < MIN_FREE_HEAP_FOR_TEXT_LAYOUT) return false;
+  // The lease only guarantees the inflate dictionary — the layout loop still
+  // needs real free heap of its own (see MIN_WORKING_* above). Both bounds
+  // are implied by the raw floors, so behavior without a lease is unchanged.
+  return heap.freeHeap >= MIN_WORKING_FREE_HEAP_FOR_TEXT_LAYOUT &&
+         heap.maxAllocHeap >= MIN_WORKING_MAX_ALLOC_FOR_TEXT_LAYOUT;
+}
+
 bool ChapterHtmlSlimParser::shouldAbortForLowMemory(const char* stage) {
   if (lowMemoryAbort) {
     return true;
   }
 
   auto heap = MemoryBudget::snapshot();
-  if (heap.freeHeap >= MIN_FREE_HEAP_FOR_TEXT_LAYOUT && heap.maxAllocHeap >= MIN_MAX_ALLOC_FOR_TEXT_LAYOUT) {
+  if (textLayoutFloorsMet(heap)) {
     return false;
   }
 
@@ -311,14 +369,14 @@ bool ChapterHtmlSlimParser::shouldAbortForLowMemory(const char* stage) {
       LOG_DBG("EHP", "Released SD font caches before %s: free=%u->%u maxAlloc=%u->%u", stage, heap.freeHeap,
               afterRelease.freeHeap, heap.maxAllocHeap, afterRelease.maxAllocHeap);
       heap = afterRelease;
-      if (heap.freeHeap >= MIN_FREE_HEAP_FOR_TEXT_LAYOUT && heap.maxAllocHeap >= MIN_MAX_ALLOC_FOR_TEXT_LAYOUT) {
+      if (textLayoutFloorsMet(heap)) {
         return false;
       }
     }
   }
 
-  LOG_ERR("EHP", "Low heap during %s (%u free, %u max alloc); aborting section build", stage, heap.freeHeap,
-          heap.maxAllocHeap);
+  LOG_ERR("EHP", "Low heap during %s (%u free, %u max alloc, %u reserved); aborting section build", stage,
+          heap.freeHeap, heap.maxAllocHeap, static_cast<unsigned>(ScratchWorkspace::leasedCapacity()));
   lowMemoryAbort = true;
   return true;
 }
@@ -1567,23 +1625,21 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
             return;
           } else {
             if (ImageDecoderFactory::isFormatSupported(resolvedPath)) {
-              // Create a unique filename for the cached image
-              std::string ext;
-              size_t extPos = resolvedPath.rfind('.');
-              if (extPos != std::string::npos) {
-                ext = resolvedPath.substr(extPos);
-              }
-              std::string cachedImagePath = self->imageBasePath + std::to_string(self->imageCounter++) + ext;
+              std::string cachedImagePath = cachedImagePathForSource(self->imageBasePath, resolvedPath);
 
-              // Extract image to cache file
-              FsFile cachedImageFile;
-              bool extractSuccess = false;
-              if (Storage.openFileForWrite("EHP", cachedImagePath, cachedImageFile)) {
-                extractSuccess =
-                    self->epub->readItemContentsToStream(resolvedPath, cachedImageFile, IMAGE_EXTRACT_CHUNK_SIZE);
-                cachedImageFile.flush();
-                cachedImageFile.close();
-                delay(50);  // Give SD card time to sync
+              // Reuse a pre-extracted (or previously extracted) cache file;
+              // extract only on a miss. Section's pre-pass fills these with a
+              // clean heap so no zip inflation happens mid-parse.
+              bool extractSuccess = cachedFileHasContent(cachedImagePath.c_str());
+              if (!extractSuccess) {
+                FsFile cachedImageFile;
+                if (Storage.openFileForWrite("EHP", cachedImagePath, cachedImageFile)) {
+                  extractSuccess =
+                      self->epub->readItemContentsToStream(resolvedPath, cachedImageFile, IMAGE_EXTRACT_CHUNK_SIZE);
+                  cachedImageFile.flush();
+                  cachedImageFile.close();
+                  delay(50);  // Give SD card time to sync
+                }
               }
 
               if (extractSuccess) {
@@ -2577,6 +2633,13 @@ void ChapterHtmlSlimParser::prewarmSectionAdvanceTable(FsFile& file) const {
     return;
   }
 
+  const auto heap = MemoryBudget::snapshot();
+  if (heap.freeHeap < MIN_FREE_HEAP_FOR_SECTION_ADVANCE_PREWARM) {
+    LOG_DBG("EHP", "Skipping section advance prewarm (free=%u, need %u)", heap.freeHeap,
+            static_cast<unsigned>(MIN_FREE_HEAP_FOR_SECTION_ADVANCE_PREWARM));
+    return;
+  }
+
   std::unique_ptr<uint32_t[]> codepoints(new (std::nothrow) uint32_t[SECTION_ADVANCE_PREWARM_MAX_CODEPOINTS]);
   std::unique_ptr<uint8_t[]> buffer(new (std::nothrow) uint8_t[SECTION_ADVANCE_PREWARM_READ_BUFFER_SIZE]);
   if (!codepoints || !buffer) {
@@ -3008,4 +3071,25 @@ void ChapterHtmlSlimParser::makePages() {
     }
     currentPageNextY = 0;
   }
+}
+
+std::string ChapterHtmlSlimParser::cachedImagePathForSource(const std::string& imageBasePath,
+                                                            const std::string& resolvedPath) {
+  // FNV-1a over the resolved source path: stable across builds and across the
+  // pre-extraction pass / parser, unlike the old encounter-order counter.
+  uint32_t hash = 2166136261u;
+  for (const char c : resolvedPath) {
+    hash ^= static_cast<uint8_t>(c);
+    hash *= 16777619u;
+  }
+
+  std::string ext;
+  const size_t extPos = resolvedPath.rfind('.');
+  if (extPos != std::string::npos) {
+    ext = resolvedPath.substr(extPos);
+  }
+
+  char hex[9];
+  snprintf(hex, sizeof(hex), "%08x", static_cast<unsigned>(hash));
+  return imageBasePath + hex + ext;
 }

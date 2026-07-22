@@ -52,6 +52,13 @@ namespace ScratchWorkspace {
 
 bool initialize() { return ensureMutex(); }
 
+size_t leasedCapacity() {
+  if (!lock()) return 0;
+  const size_t capacity = gLeased ? gCapacity : 0;
+  unlock();
+  return capacity;
+}
+
 void releaseLease(Lease& lease) {
   if (!lease.valid) return;
   if (!lock()) {

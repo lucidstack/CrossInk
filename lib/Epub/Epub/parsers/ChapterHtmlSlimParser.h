@@ -2,6 +2,7 @@
 
 #include <Arena.h>
 #include <HalStorage.h>
+#include <MemoryBudget.h>
 #include <expat.h>
 
 #include <climits>
@@ -71,7 +72,7 @@ class ChapterHtmlSlimParser {
   uint8_t imageRendering;
   std::string contentBase;
   std::string imageBasePath;
-  int imageCounter = 0;
+  bool imagesPreExtracted_ = false;
   bool lowMemoryImageFallback = false;
   bool lowMemoryAbort = false;
   bool attemptedTextLayoutFontCacheRelease = false;
@@ -179,6 +180,7 @@ class ChapterHtmlSlimParser {
   void skipCurrentElement();
   void skipDescendantsOfCurrentElement();
   bool shouldAbortForLowMemory(const char* stage);
+  bool textLayoutFloorsMet(const MemoryBudget::HeapSnapshot heap) const;
   bool startNewPage(const char* reason);
   void startNewTextBlock(const BlockStyle& blockStyle);
   void flushPendingAnchor();
@@ -262,6 +264,17 @@ class ChapterHtmlSlimParser {
   const std::vector<std::pair<std::string, uint16_t>>& getAnchors() const { return anchorData; }
   bool wasLowMemoryFallbackTriggered() const { return lowMemoryImageFallback; }
   bool wasLowMemoryAbortTriggered() const { return lowMemoryAbort; }
+
+  // Section calls this after pre-extracting the chapter's images to the SD
+  // cache with a clean heap: the parse then needs no mid-parse zip inflation,
+  // so the low-memory floors drop the 32KB inflate-dictionary requirement and
+  // only guard genuine layout working room.
+  void setImagesPreExtracted(const bool v) { imagesPreExtracted_ = v; }
+
+  // Cache path for an extracted image, keyed on the resolved source path (not
+  // an encounter counter) so Section's pre-extraction pass and the parser
+  // agree on names regardless of which images each of them ends up skipping.
+  static std::string cachedImagePathForSource(const std::string& imageBasePath, const std::string& resolvedPath);
 
  private:
   enum class ParseStatus { More, Done, Error };
