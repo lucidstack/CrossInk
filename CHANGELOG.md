@@ -1,3 +1,18 @@
+## [Unreleased]
+
+### Added
+
+- Experimental Markdown note editor driven by a BLE keyboard (spike builds only, `-DEDITOR_BLE_SPIKE`): a Notes item on the Home menu (with its own icon) for browsing, writing, and saving notes to `/notes`, and a Bluetooth settings tab for scanning, pairing, and forgetting keyboards. See `docs/editor-spike.md`.
+
+### Changed
+
+- EPUB chapter images are now extracted to the SD cache before text layout begins, so image-heavy chapters no longer fail to open with "Chapter needs too much memory" when the heap is fragmented.
+
+### Fixed
+
+- EPUB chapter layout under severe memory pressure now aborts to an error message instead of crashing and rebooting the device.
+- The Home menu no longer silently drops its last entry (Settings) when new menu items push it past its internal capacity.
+
 ## [v1.4.0] - 2026-07-10
 
 ### Added
