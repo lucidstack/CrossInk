@@ -28,6 +28,7 @@
 #include "components/icons/library.h"
 #include "components/icons/recent.h"
 #include "components/icons/settings2.h"
+#include "components/icons/text.h"
 #include "components/icons/text24.h"
 #include "components/icons/transfer.h"
 #include "components/icons/wifi.h"
@@ -55,6 +56,8 @@ int mainMenuIconYOffset(const UIIcon icon) {
     case UIIcon::Folder:
       return -4;
     case UIIcon::Recent:
+      return -3;
+    case UIIcon::Text:
       return -3;
     case UIIcon::Transfer:
       return -2;
@@ -89,6 +92,8 @@ const uint8_t* LyraTheme::iconForName(UIIcon icon, uint32_t size) {
     switch (icon) {
       case UIIcon::Folder:
         return FolderIcon;
+      case UIIcon::Text:
+        return TextIcon;
       case UIIcon::Book:
         return BookIcon;
       case UIIcon::Chart:
