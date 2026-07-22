@@ -73,7 +73,11 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 8;
+  // Max entries = ContinueReading + BrowseFiles + Notes + RecentBooks + Opds +
+  // Stats + Saved + FileTransfer + Settings = 9. Keep headroom above that; an
+  // undersized array silently drops the last push (Settings), which is how the
+  // Notes item first surfaced this. Bump this if more home items are added.
+  static constexpr int kCapacity = 10;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -589,6 +593,9 @@ static_assert(HomeActivity::kMaxCachedBooks >= LyraCarouselMetrics::values.homeR
 int HomeActivity::getMenuItemCount() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
   int count = 4;  // File Browser, Recents, File transfer, Settings
+#ifdef EDITOR_BLE_SPIKE
+  count++;  // Notes (appendHomeMenuItems adds it right after File Browser)
+#endif
   if (!metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     count += getVisibleRecentBookCount();
   } else if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
